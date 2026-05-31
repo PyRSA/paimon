@@ -24,6 +24,7 @@ import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.DataType;
 import org.apache.paimon.types.RowType;
 
+import java.util.Collections;
 import java.util.List;
 
 import static org.apache.paimon.utils.Preconditions.checkArgument;
@@ -37,7 +38,9 @@ public class FieldNestedPartialUpdateAggFactory implements FieldAggregatorFactor
     public FieldNestedPartialUpdateAgg create(
             DataType fieldType, CoreOptions options, String field) {
         return createFieldNestedPartialUpdateAgg(
-                fieldType, options.fieldNestedUpdateAggNestedKey(field));
+                fieldType,
+                options.fieldNestedUpdateAggNestedKey(field),
+                options.fieldNestedUpdateAggNestedSequenceField(field));
     }
 
     @Override
@@ -46,13 +49,19 @@ public class FieldNestedPartialUpdateAggFactory implements FieldAggregatorFactor
     }
 
     private FieldNestedPartialUpdateAgg createFieldNestedPartialUpdateAgg(
-            DataType fieldType, List<String> nestedKey) {
+            DataType fieldType, List<String> nestedKey, List<String> nestedSequenceField) {
         checkArgument(!nestedKey.isEmpty());
+
+        if (nestedSequenceField == null) {
+            nestedSequenceField = Collections.emptyList();
+        }
+
         String typeErrorMsg =
                 "Data type for nested table column must be 'Array<Row>' but was '%s'.";
         checkArgument(fieldType instanceof ArrayType, typeErrorMsg, fieldType);
         ArrayType arrayType = (ArrayType) fieldType;
         checkArgument(arrayType.getElementType() instanceof RowType, typeErrorMsg, fieldType);
-        return new FieldNestedPartialUpdateAgg(identifier(), arrayType, nestedKey);
+        return new FieldNestedPartialUpdateAgg(
+                identifier(), arrayType, nestedKey, nestedSequenceField);
     }
 }
