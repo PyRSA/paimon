@@ -2299,7 +2299,8 @@ public class FieldAggregatorTest {
                                         DataTypes.FIELD(0, "k", DataTypes.INT()),
                                         DataTypes.FIELD(1, "v1", DataTypes.INT()),
                                         DataTypes.FIELD(2, "v2", DataTypes.STRING()))),
-                        Collections.singletonList("k"));
+                        Collections.singletonList("k"),
+                        null);
 
         InternalArray accumulator;
         InternalArray.ElementGetter elementGetter =
@@ -2324,6 +2325,78 @@ public class FieldAggregatorTest {
         accumulator = (InternalArray) agg.agg(accumulator, singletonArray(current));
         assertThat(unnest(accumulator, elementGetter))
                 .containsExactlyInAnyOrderElementsOf(Arrays.asList(row(0, 1, "B"), row(1, 2, "C")));
+    }
+
+    @Test
+    public void testFieldNestedPartialUpdateAggWithNestedKeyNullUseIgnoreStrategy() {
+        DataType elementRowType =
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "k", DataTypes.INT()),
+                        DataTypes.FIELD(1, "v1", DataTypes.INT()),
+                        DataTypes.FIELD(2, "v2", DataTypes.STRING()));
+        FieldNestedPartialUpdateAgg agg =
+                new FieldNestedPartialUpdateAgg(
+                        FieldNestedPartialUpdateAggFactory.NAME,
+                        DataTypes.ARRAY(
+                                DataTypes.ROW(
+                                        DataTypes.FIELD(0, "k", DataTypes.INT()),
+                                        DataTypes.FIELD(1, "v1", DataTypes.INT()),
+                                        DataTypes.FIELD(2, "v2", DataTypes.STRING()))),
+                        Collections.singletonList("k"),
+                        CoreOptions.NestedKeyNullStrategy.IGNORE);
+
+        InternalArray accumulator;
+        InternalArray.ElementGetter elementGetter =
+                InternalArray.createElementGetter(elementRowType);
+
+        InternalRow current = row(0, 0, null);
+        accumulator = (InternalArray) agg.agg(null, singletonArray(current));
+        assertThat(unnest(accumulator, elementGetter))
+                .containsExactlyInAnyOrderElementsOf(Collections.singletonList(current));
+
+        // nested key is null, so we ignore it
+        current = row(null, null, "A_ignore");
+        accumulator = (InternalArray) agg.agg(accumulator, singletonArray(current));
+        assertThat(unnest(accumulator, elementGetter))
+                .containsExactlyInAnyOrderElementsOf(Collections.singletonList(row(0, 0, null)));
+
+        current = row(0, 1, "B");
+        accumulator = (InternalArray) agg.agg(accumulator, singletonArray(current));
+        assertThat(unnest(accumulator, elementGetter))
+                .containsExactlyInAnyOrderElementsOf(Collections.singletonList(row(0, 1, "B")));
+    }
+
+    @Test
+    public void testFieldNestedPartialUpdateAggWithNestedKeyNullUseThrowErrorStrategy() {
+        DataType elementRowType =
+                DataTypes.ROW(
+                        DataTypes.FIELD(0, "k", DataTypes.INT()),
+                        DataTypes.FIELD(1, "v1", DataTypes.INT()),
+                        DataTypes.FIELD(2, "v2", DataTypes.STRING()));
+        FieldNestedPartialUpdateAgg agg =
+                new FieldNestedPartialUpdateAgg(
+                        FieldNestedPartialUpdateAggFactory.NAME,
+                        DataTypes.ARRAY(
+                                DataTypes.ROW(
+                                        DataTypes.FIELD(0, "k", DataTypes.INT()),
+                                        DataTypes.FIELD(1, "v1", DataTypes.INT()),
+                                        DataTypes.FIELD(2, "v2", DataTypes.STRING()))),
+                        Collections.singletonList("k"),
+                        CoreOptions.NestedKeyNullStrategy.ERROR);
+
+        InternalArray accumulator;
+        InternalArray.ElementGetter elementGetter =
+                InternalArray.createElementGetter(elementRowType);
+
+        InternalRow current = row(0, 0, null);
+        accumulator = (InternalArray) agg.agg(null, singletonArray(current));
+        assertThat(unnest(accumulator, elementGetter))
+                .containsExactlyInAnyOrderElementsOf(Collections.singletonList(current));
+
+        assertThatThrownBy(() -> agg.agg(accumulator, singletonArray(row(null, 0, "A", 2))))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage(
+                        "Nested key contains null values. Primary key fields must not be null.");
     }
 
     private Map<Object, Object> toMap(Object... kvs) {

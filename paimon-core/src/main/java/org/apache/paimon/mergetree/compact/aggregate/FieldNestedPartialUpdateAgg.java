@@ -18,6 +18,7 @@
 
 package org.apache.paimon.mergetree.compact.aggregate;
 
+import org.apache.paimon.CoreOptions;
 import org.apache.paimon.codegen.Projection;
 import org.apache.paimon.data.BinaryRow;
 import org.apache.paimon.data.GenericArray;
@@ -29,6 +30,7 @@ import org.apache.paimon.types.ArrayType;
 import org.apache.paimon.types.RowType;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -45,14 +47,23 @@ public class FieldNestedPartialUpdateAgg extends FieldAggregator {
     private static final long serialVersionUID = 1L;
 
     private final int nestedFields;
+    private final CoreOptions.NestedKeyNullStrategy nestedKeyNullStrategy;
     private final Projection keyProjection;
     private final FieldGetter[] fieldGetters;
 
-    public FieldNestedPartialUpdateAgg(String name, ArrayType dataType, List<String> nestedKey) {
+    public FieldNestedPartialUpdateAgg(
+            String name,
+            ArrayType dataType,
+            List<String> nestedKey,
+            CoreOptions.NestedKeyNullStrategy nestedKeyNullStrategy) {
         super(name, dataType);
         RowType nestedType = (RowType) dataType.getElementType();
         this.nestedFields = nestedType.getFieldCount();
         checkArgument(!nestedKey.isEmpty());
+        this.nestedKeyNullStrategy =
+                nestedKeyNullStrategy == null
+                        ? CoreOptions.NestedKeyNullStrategy.MERGE
+                        : nestedKeyNullStrategy;
         this.keyProjection = newProjection(nestedType, nestedKey);
         this.fieldGetters = new FieldGetter[nestedFields];
         for (int i = 0; i < nestedFields; i++) {
@@ -77,6 +88,24 @@ public class FieldNestedPartialUpdateAgg extends FieldAggregator {
             Map<BinaryRow, GenericRow> map = new HashMap<>();
             for (InternalRow row : rows) {
                 BinaryRow key = keyProjection.apply(row).copy();
+                if (key.anyNull()) {
+                    switch (nestedKeyNullStrategy) {
+                        case MERGE:
+                            break;
+                        case IGNORE:
+                            continue;
+                        case ERROR:
+                            throw new IllegalArgumentException(
+                                    "Nested key contains null values. Primary key fields must not be null.");
+                        default:
+                            throw new UnsupportedOperationException(
+                                    String.format(
+                                            "Unsupported nested-key-null-strategy '%s'. Supported values are: %s.",
+                                            nestedKeyNullStrategy,
+                                            Arrays.toString(
+                                                    CoreOptions.NestedKeyNullStrategy.values())));
+                    }
+                }
                 GenericRow toUpdate = map.computeIfAbsent(key, k -> new GenericRow(nestedFields));
                 partialUpdate(toUpdate, row);
             }
