@@ -339,12 +339,67 @@ table_write = (
 table_write.write_ray(ray_dataset)
 ```
 
+## Bucket Join
+
+`bucket_join` joins two **co-bucketed** tables (same bucket count and the same
+bucket-key) on the bucket-key, with **no global shuffle**: the same key lands in
+the same bucket on both sides, so each bucket is read and joined in its own Ray
+task. It returns a `ray.data.Dataset` whose results stay distributed (never
+pulled into the driver).
+
+A common use is looking up a global `_ROW_ID` for a batch of keys without a
+shuffle join against a large table: keep a small co-bucketed `(key, _ROW_ID)`
+side table, `bucket_join` the incoming keys against it, then feed the resulting
+row ids into a row-id update.
+
+```python
+from pypaimon.ray import bucket_join
+
+ds = bucket_join(
+    left="database_name.incoming_keys",   # co-bucketed table identifier
+    right="database_name.key_rowid",       # co-bucketed table identifier
+    catalog_options={"warehouse": "/path/to/warehouse"},
+    on="url",                              # must equal the bucket-key
+    left_projection=["url"],               # optional; must keep the join key
+    right_projection=["url", "row_id"],    # optional; must keep the join key
+)
+# ds: ray.data.Dataset of the joined rows, e.g. {"url": ..., "row_id": ...}
+```
+
+**Parameters:**
+- `left` / `right`: identifiers of the two co-bucketed tables to join.
+- `on`: the join key(s). Must be exactly the bucket-key — equal keys only
+  co-locate by bucket when joining on the bucket-key.
+- `left_projection` / `right_projection`: optional column projections applied on
+  read. If given, each must include the join key.
+- `join_type`: only `"inner"` is supported (an outer join would need the union
+  of buckets, which per-bucket intersection cannot produce).
+- `ray_remote_args`: Ray remote options applied to each per-bucket join task.
+
+**Returns:** a `ray.data.Dataset` of the joined rows.
+
+**Notes:**
+- Both tables must be fixed-bucket (`bucket > 0`) with the same bucket count and
+  the same bucket-key (same column names, order, and types); otherwise
+  `bucket_join` raises. For primary-key tables that do not set `bucket-key`
+  explicitly, the bucket-key resolves to the (partition-trimmed) primary key.
+- The two sides must not share columns other than the join key, or the
+  underlying pyarrow join would collide; project them away with
+  `left_projection` / `right_projection` first.
+- Each side is planned at its own latest snapshot, and one bucket is joined by a
+  single Ray task that reads the whole bucket into memory. Choose a bucket count
+  that spreads keys evenly to avoid skewed, memory-heavy tasks.
+- Partitioned tables are not supported yet (bucket ids are per-partition).
+
 ## Merge Into
 
-`merge_into` updates (and optionally inserts) rows of a **data-evolution** table
-from a source, like SQL `MERGE INTO`. Matched rows are updated in place by
-`_ROW_ID`; only the touched columns are rewritten. Requires `ray >= 2.50` and a
-target table with `'data-evolution.enabled'` and `'row-tracking.enabled'` set.
+`merge_into` updates or deletes matched rows and optionally inserts unmatched
+rows of a **data-evolution** table from a source, like SQL `MERGE INTO`.
+Matched rows are updated in place by `_ROW_ID`; only the touched columns are
+rewritten. Matched delete clauses are written through deletion vectors.
+Requires `ray >= 2.50` and a target table with `'data-evolution.enabled'` and
+`'row-tracking.enabled'` set. If you use matched delete clauses, the target
+must also enable `'deletion-vectors.enabled'`.
 
 ```python
 from pypaimon.ray import merge_into, WhenMatched, WhenNotMatched
@@ -354,7 +409,7 @@ metrics = merge_into(
     source=ray_dataset,          # ray.data.Dataset / pa.Table / pandas / table-name str
     catalog_options={"warehouse": "/path/to/warehouse"},
     on=["id"],                   # or {"target_col": "source_col"} for renamed keys
-    when_matched=[WhenMatched(update="*")],
+    when_matched=[WhenMatched.update("*")],
     when_not_matched=[WhenNotMatched(insert="*")],             # optional
 )
 print(metrics)   # {"num_matched": 3, "num_inserted": 2, "num_unchanged": 0}
@@ -368,21 +423,41 @@ merge_into(
     source=source_ds,
     catalog_options=catalog_options,
     on=["id"],
-    when_matched=[WhenMatched(update="*", condition="s.age > t.age")],
+    when_matched=[WhenMatched.update("*", condition="s.age > t.age")],
     when_not_matched=[WhenNotMatched(insert="*", condition="s.age > 18")],
+)
+```
+
+Use `WhenMatched.delete()` to delete matched rows:
+
+```python
+merge_into(
+    target="db.table",
+    source=source_ds,
+    catalog_options=catalog_options,
+    on=["id"],
+    when_matched=[
+        WhenMatched.delete(condition="s.deleted = TRUE"),
+        WhenMatched.update("*"),
+    ],
 )
 ```
 
 Conditions use SQL-style expressions with `s.` (source) and `t.` (target)
 column prefixes. `WhenNotMatched` conditions may only reference source
-columns (`s.*`). Requires the `datafusion` package: `pip install pypaimon[sql]`.
+columns (`s.*`). Condition evaluation uses DataFusion through the PyPaimon SQL
+extra. Install the extra before using conditions: `pip install pypaimon[sql]`.
 
-- `update` / `insert`: `"*"` updates/inserts all non-blob columns from source.
+- `update` / `delete` / `insert`: `WhenMatched.update(...)` updates matched
+  rows, `WhenMatched.delete()` deletes matched rows, and
+  `WhenNotMatched(insert=...)` inserts unmatched rows. `"*"` updates/inserts
+  all columns from source, including blob columns.
   A mapping selects specific columns:
   ```python
   from pypaimon.ray import source_col, target_col, lit
 
-  WhenMatched(update={"age": source_col("age"), "name": target_col("name")})
+  WhenMatched.update({"age": source_col("age"), "name": target_col("name")})
+  WhenMatched.delete()
   WhenNotMatched(insert={"id": source_col("id"), "status": lit("new")})
   ```
   `"s.<col>"` / `"t.<col>"` shorthands also work (`t.*` only in update).
@@ -392,8 +467,8 @@ columns (`s.*`). Requires the `datafusion` package: `pip install pypaimon[sql]`.
 - Multiple clauses are evaluated in order; the first matching condition wins:
   ```python
   when_matched=[
-      WhenMatched(update="*", condition="s.ts > t.ts"),
-      WhenMatched(update="*"),  # fallback for unmatched rows
+      WhenMatched.update("*", condition="s.ts > t.ts"),
+      WhenMatched.update("*"),  # fallback for unmatched rows
   ]
   ```
 
@@ -405,21 +480,22 @@ columns (`s.*`). Requires the `datafusion` package: `pip install pypaimon[sql]`.
 - `num_partitions`: shuffle parallelism for the join and the write; defaults to
   `max(1, cluster_cpus * 2)`. Raise it for large merges on big clusters.
 - `ray_remote_args`: Ray remote options applied to the merge's map/group
-  tasks (update transform, group write, insert transform).
+  tasks (update/delete transform, group write, insert transform).
 - `concurrency`: scheduling for the insert sink.
 
 **Returns:** `{"num_matched", "num_inserted", "num_unchanged"}`. `num_matched`
-counts the rows actually updated (after condition filtering). `num_unchanged`
-is `0` in the current implementation.
+counts the rows actually updated or deleted (after condition filtering).
+`num_unchanged` is `0` in the current implementation.
 
 For an end-to-end feature update workflow on Blob tables, see
 [Distributed Feature Backfill with Ray](../learn-paimon/scenario-guide#distributed-feature-backfill-with-ray).
 
 **Notes:**
-- Partition key columns cannot be updated by matched clauses. If the target
-  table is partitioned, `merge_into` raises an error when `when_matched` is
-  specified, because cross-partition row movement is not implemented.
+- Partition key columns cannot be updated by matched update clauses, because
+  cross-partition row movement is not implemented. Matched delete clauses and
+  matched updates of non-partition columns work on partitioned tables.
   Not-matched inserts into partitioned tables work normally.
-- Blob columns are not written by `merge_into`: update leaves the existing
-  `.blob` files untouched, and insert fills blob columns with `NULL`. The
-  source data does not need to (and should not) carry blob columns.
+- Matched delete clauses require `deletion-vectors.enabled = true`.
+- Blob columns can be updated and inserted by `merge_into`. With `update="*"`
+  or `insert="*"`, the source must include the corresponding blob columns.
+  If an insert mapping omits a blob column, that column is written as `NULL`.

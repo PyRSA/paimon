@@ -637,6 +637,16 @@ public class CoreOptions implements Serializable {
                             "Max split size should be cached for one task while scanning. "
                                     + "If splits size cached in enumerator are greater than tasks size multiply by this value, scanner will pause scanning.");
 
+    public static final ConfigOption<Integer> SCAN_BUCKET =
+            key("scan.bucket")
+                    .intType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Specify a single bucket to scan. This option filters manifest entries "
+                                    + "and only plans splits for the given bucket. It is only supported "
+                                    + "for fixed-bucket primary key tables (bucket > 0). It cannot be used "
+                                    + "with postpone bucket tables.");
+
     @Immutable
     public static final ConfigOption<MergeEngine> MERGE_ENGINE =
             key("merge-engine")
@@ -1423,6 +1433,19 @@ public class CoreOptions implements Serializable {
                     .memoryType()
                     .defaultValue(MemorySize.parse("256 mb"))
                     .withDescription("Max memory size for lookup cache.");
+
+    public static final ConfigOption<Boolean> LOOKUP_CACHE_BLOB_DESCRIPTOR =
+            key("lookup.blob-as-descriptor")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "When enabled, the lookup join stores only the BlobDescriptor "
+                                    + "(a lightweight reference containing file URI, offset, and length) "
+                                    + "for BLOB fields instead of the full blob bytes. This dramatically "
+                                    + "reduces local disk and memory usage for tables with large BLOB "
+                                    + "columns (e.g., images, videos). The downstream consumer receives "
+                                    + "the serialized BlobDescriptor bytes and can resolve the actual "
+                                    + "blob content on demand.");
 
     public static final ConfigOption<Double> LOOKUP_CACHE_HIGH_PRIO_POOL_RATIO =
             key("lookup.cache.high-priority-pool-ratio")
@@ -2529,31 +2552,9 @@ public class CoreOptions implements Serializable {
                     .defaultValue(false)
                     .withDescription(
                             "Whether to write NULL for a descriptor BLOB value when the "
-                                    + "referenced file does not exist during Flink writes. When "
-                                    + "false, the write fails when the descriptor is read.");
-
-    @Immutable
-    public static final ConfigOption<String> BLOB_EXTERNAL_STORAGE_PATH =
-            key("blob-external-storage-path")
-                    .stringType()
-                    .noDefaultValue()
-                    .withDescription(
-                            "The external storage path where raw BLOB data from fields configured "
-                                    + "by 'blob-external-storage-field' is written at write time. "
-                                    + "Orphan file cleanup is not applied to this path.");
-
-    @Immutable
-    public static final ConfigOption<String> BLOB_EXTERNAL_STORAGE_FIELD =
-            key("blob-external-storage-field")
-                    .stringType()
-                    .noDefaultValue()
-                    .withDescription(
-                            "Comma-separated BLOB field names (must be a subset of '"
-                                    + BLOB_DESCRIPTOR_FIELD.key()
-                                    + "') whose raw data will be written to external storage at "
-                                    + "write time. The external storage path is configured via '"
-                                    + BLOB_EXTERNAL_STORAGE_PATH.key()
-                                    + "'. Orphan file cleanup is not applied to that path.");
+                                    + "referenced file or HTTP resource does not exist during Flink "
+                                    + "writes. When false, the write fails when the descriptor is "
+                                    + "read.");
 
     public static final ConfigOption<Boolean> COMMIT_DISCARD_DUPLICATE_FILES =
             key("commit.discard-duplicate-files")
@@ -3258,32 +3259,14 @@ public class CoreOptions implements Serializable {
     }
 
     /**
-     * Resolve blob fields whose data should be written to external storage at write time. These
-     * fields must be a subset of {@link #blobDescriptorField()}.
-     */
-    public Set<String> blobExternalStorageField() {
-        return parseCommaSeparatedSet(BLOB_EXTERNAL_STORAGE_FIELD);
-    }
-
-    /**
      * Returns the set of BLOB fields that support partial updates (e.g. via MERGE INTO).
      *
      * <p>Currently, only descriptor-based BLOB fields (configured via {@link
      * #BLOB_DESCRIPTOR_FIELD}) are updatable. Raw-data BLOB fields are not updatable because the
-     * update cost is too high. Fields configured by {@link #BLOB_EXTERNAL_STORAGE_FIELD} are a
-     * subset of descriptor fields and therefore are also updatable.
+     * update cost is too high.
      */
     public Set<String> updatableBlobFields() {
         return blobInlineField();
-    }
-
-    /**
-     * Return the external storage path for descriptor BLOB fields that write raw data outside the
-     * table location. Returns null if not configured.
-     */
-    @Nullable
-    public String blobExternalStoragePath() {
-        return options.get(BLOB_EXTERNAL_STORAGE_PATH);
     }
 
     private Set<String> parseCommaSeparatedSet(ConfigOption<String> option) {
@@ -3580,6 +3563,10 @@ public class CoreOptions implements Serializable {
 
     public Integer scanManifestParallelism() {
         return options.get(SCAN_MANIFEST_PARALLELISM);
+    }
+
+    public Integer scanBucket() {
+        return options.get(SCAN_BUCKET);
     }
 
     public Duration streamingReadDelay() {
