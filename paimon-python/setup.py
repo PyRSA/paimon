@@ -24,12 +24,12 @@ import tarfile
 import tempfile
 from setuptools import find_packages, setup
 
-VERSION = "1.5.dev"
+VERSION = "2.1.dev"
 
 
 def get_dev_version():
     """Generate dev version with commit date.
-    Format: 1.5.devYYYYMMDD (e.g. 1.5.dev20260415)
+    Format: 2.1.devYYYYMMDD (e.g. 2.1.dev20260415)
     Uses the commit date (author date) for reproducibility.
     """
     base = VERSION.rstrip(".")
@@ -181,14 +181,18 @@ setup(
             'lumina-data>=0.1.0'
         ],
         'vindex': [
-            'paimon-vindex==0.1.0; python_version>="3.9"',
+            'paimon-vindex==0.3.0; python_version>="3.9"',
         ],
         'full-text': [
             'paimon-ftindex==0.1.0; python_version>="3.8"',
         ],
+        'theta-sketch': [
+            'datasketches>=4,<5; python_version<"3.9"',
+            'datasketches>=5,<6; python_version>="3.9"',
+        ],
         'sql': [
-            'pypaimon-rust>=0.3.0,<0.4.0; python_version>="3.10"',
-            'datafusion>=52; python_version>="3.10"',
+            'pypaimon-rust>=0.3.0; python_version>="3.10"',
+            'datafusion>=54,<55; python_version>="3.10"',
         ],
         'hdfs': [
             'hdfs-native>=0.13,<1; python_version >= "3.10" and platform_system != "Windows"',
